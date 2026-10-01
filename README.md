@@ -1,0 +1,139 @@
+# Observable Web App + Trace-Propagating Selenium Tests
+
+A small demo showing two things together:
+
+1. A web app instrumented with **OpenTelemetry** (traces, metrics, logs) so you
+   can see how people use it.
+2. A **Selenium** test suite that hooks into that observability by injecting a
+   W3C `traceparent` into the browser's requests **via Selenium BiDi**, so a
+   single user action is one end-to-end trace: **test → browser → backend**.
+
+```
+Selenium test (root span per action)
+      │  BiDi network intercept adds `traceparent` to browser requests
+      ▼
+   Chrome ──fetch/navigate──▶ Flask backend (auto + manual OTel spans)
+      │                              │
+      │                              ├─ traces  ─▶ Jaeger  (UI :16686)
+      │                              ├─ metrics ─▶ console (stdout)
+      │                              └─ logs    ─▶ console (trace-correlated)
+      │
+      └─ test spans ─▶ Jaeger  (same trace id → nested under the test)
+```
+
+The app is a tiny in-memory to-do list (create / complete / delete) — just
+enough real user actions to observe.
+
+## Layout
+
+```
+app/
+  main.py            Flask routes (auto-instrumented) + manual spans/metrics/logs
+  telemetry.py       OTel wiring: traces→Jaeger, metrics→console, logs→console
+  templates/index.html   UI with stable data-testid hooks; plain fetch() calls
+tests/
+  conftest.py        BiDi-enabled Chrome driver + test-side OTel ("selenium-tests")
+  bidi_trace.py      TraceparentInjector: BiDi network intercept that injects traceparent
+  jaeger.py          Tiny Jaeger query-API client for asserting on traces
+  test_task_flow.py  End-to-end scenario (one span per user action) + a trace-based test
+scripts/
+  run_jaeger.sh      Downloads + runs the Jaeger all-in-one native binary (no Docker)
+  run_app.sh         Runs the Flask app
+```
+
+## Prerequisites
+
+- Python 3.9+ and Google Chrome (chromedriver is fetched automatically by
+  Selenium Manager on first run).
+- Network access on first run (to download Jaeger + chromedriver).
+
+## Setup
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+```
+
+## Run it (three terminals)
+
+```bash
+# 1. Jaeger (traces UI at http://localhost:16686, OTLP in on :4318)
+./scripts/run_jaeger.sh
+
+# 2. The app (http://127.0.0.1:5000)
+./scripts/run_app.sh
+
+# 3. The tests
+.venv/bin/python -m pytest tests/ -v
+```
+
+Then open **http://localhost:16686**, pick the `selenium-tests` service, and
+open the newest trace. You'll see one trace spanning both services:
+
+```
+[selenium-tests] test: full task lifecycle
+  [selenium-tests] add task
+    [todo-app] POST /api/tasks
+      [todo-app] create_task
+  [selenium-tests] complete task
+    [todo-app] POST /api/tasks/<int:task_id>/complete
+      [todo-app] complete_task
+  ...
+```
+
+Metrics (`tasks.created`, `http.server.duration`, …) and logs print to the
+app's console; each log line carries the active `trace_id`, so you can pivot
+from a log straight to its trace in Jaeger.
+
+To watch the app in a real browser instead of headless: `HEADLESS=0 .venv/bin/pytest tests/ -v`.
+
+## Trace-based assertions
+
+`test_add_task_trace` goes one step further than the UI checks. After adding a
+task it flushes the test's spans, fetches the whole trace from Jaeger's query
+API (`GET /api/traces/{trace_id}`) and asserts on the journey itself:
+
+```python
+spans = jaeger.get_trace(trace_id, expect=["add task", "create_task"])
+add = spans.child_of("add task")
+assert add.has("POST /api/tasks")                              # shape
+assert add.has("create_task", attrs={"task.id": ui_task_id})   # identity
+assert all(s.status != "ERROR" for s in spans)                 # health
+assert spans.op("create_task").duration_ms < 50                # budget
+```
+
+`get_trace` polls until the expected spans arrive, because the app exports
+spans in batches every few seconds. This test needs Jaeger running.
+
+When pasting a `trace_id` from the app's console logs into Jaeger's search,
+drop the `0x` prefix.
+
+## How the test hooks into observability
+
+`tests/bidi_trace.py` registers a BiDi `network.beforeRequestSent` handler.
+For every browser request it calls `continue_request(headers=...)`, adding a
+`traceparent` derived from the test's currently-active OpenTelemetry span. The
+Flask instrumentation extracts that header on the server side, so backend spans
+become children of the test's span — the whole interaction is one trace.
+
+## Two non-obvious gotchas (both handled in the code)
+
+- **Navigate with BiDi, not `driver.get()`.** With a BiDi network intercept
+  active, classic WebDriver navigation never receives its load signal and times
+  out with *"Timed out receiving message from renderer"*. The test navigates via
+  `driver.browsing_context.navigate(..., wait="complete")` instead.
+- **Serialize `continue_request()`.** Selenium's Python BiDi websocket is not
+  thread-safe, and each intercepted request runs its handler on its own thread.
+  Concurrent `continue_request()` calls interleave `ws.send()` frames and can
+  drop the connection (*"Connection to remote host was lost"*), leaving requests
+  hung. `bidi_trace.py` guards the call with a process-wide lock.
+
+## Configuration
+
+| Env var | Default | Meaning |
+| --- | --- | --- |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4318` | OTLP/HTTP base for Jaeger |
+| `JAEGER_QUERY_URL` | `http://localhost:16686` | Jaeger query API used by trace assertions |
+| `APP_URL` | `http://127.0.0.1:5000` | App URL the tests drive |
+| `HEADLESS` | `1` | Set `0` to watch Chrome |
+| `JAEGER_VERSION` | latest | Pin a Jaeger release for `run_jaeger.sh` |

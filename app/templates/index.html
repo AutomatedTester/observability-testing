@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Observable To-Do</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
+    h1 { font-size: 1.4rem; }
+    form { display: flex; gap: .5rem; margin: 1rem 0; }
+    input[type=text] { flex: 1; padding: .5rem; font-size: 1rem; }
+    button { padding: .5rem .8rem; font-size: 1rem; cursor: pointer; }
+    ul { list-style: none; padding: 0; }
+    li { display: flex; align-items: center; gap: .5rem; padding: .4rem 0; border-bottom: 1px solid #8884; }
+    li.done span.title { text-decoration: line-through; opacity: .6; }
+    .title { flex: 1; }
+    .hint { opacity: .6; font-size: .85rem; }
+  </style>
+</head>
+<body>
+  <h1>Observable To-Do</h1>
+  <p class="hint">Every action below issues an instrumented request. In a Selenium
+  run, the test injects a <code>traceparent</code> header via BiDi, so each action
+  becomes one end-to-end trace in Jaeger.</p>
+
+  <form id="new-task-form">
+    <input type="text" id="task-title" data-testid="task-title" placeholder="What needs doing?" autocomplete="off" />
+    <button type="submit" data-testid="add-task">Add</button>
+  </form>
+
+  <ul id="task-list" data-testid="task-list"></ul>
+
+  <script>
+    async function api(method, url, body) {
+      const opts = { method, headers: { "Content-Type": "application/json" } };
+      if (body !== undefined) opts.body = JSON.stringify(body);
+      const res = await fetch(url, opts);
+      return res.ok ? res.json() : Promise.reject(new Error(res.status));
+    }
+
+    function render(tasks) {
+      const list = document.getElementById("task-list");
+      list.innerHTML = "";
+      for (const t of tasks) {
+        const li = document.createElement("li");
+        li.className = t.done ? "done" : "";
+        li.dataset.testid = "task";
+        li.dataset.taskId = t.id;
+
+        const title = document.createElement("span");
+        title.className = "title";
+        title.dataset.testid = "task-title-text";
+        title.textContent = t.title;
+
+        const done = document.createElement("button");
+        done.textContent = t.done ? "Done" : "Complete";
+        done.disabled = t.done;
+        done.dataset.testid = "complete-task";
+        done.onclick = async () => { await api("POST", `/api/tasks/${t.id}/complete`); await load(); };
+
+        const del = document.createElement("button");
+        del.textContent = "Delete";
+        del.dataset.testid = "delete-task";
+        del.onclick = async () => { await api("DELETE", `/api/tasks/${t.id}`); await load(); };
+
+        li.append(title, done, del);
+        list.append(li);
+      }
+    }
+
+    async function load() {
+      render(await api("GET", "/api/tasks"));
+    }
+
+    document.getElementById("new-task-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = document.getElementById("task-title");
+      const title = input.value.trim();
+      if (!title) return;
+      await api("POST", "/api/tasks", { title });
+      input.value = "";
+      await load();
+    });
+
+    load();
+  </script>
+</body>
+</html>
