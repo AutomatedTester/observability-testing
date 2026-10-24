@@ -1,0 +1,19 @@
+{
+  "name": "todo-app-frontend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild otel.js --bundle --format=esm --minify --target=es2020 --outfile=../app/static/otel.js"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "1.9.0",
+    "@opentelemetry/exporter-trace-otlp-http": "0.57.2",
+    "@opentelemetry/instrumentation": "0.57.2",
+    "@opentelemetry/instrumentation-fetch": "0.57.2",
+    "@opentelemetry/resources": "1.30.1",
+    "@opentelemetry/sdk-trace-web": "1.30.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.0"
+  }
+}
