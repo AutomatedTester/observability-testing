@@ -53,15 +53,24 @@ class TraceparentInjector:
             propagate.inject(carrier)  # reads the active OTel context on THIS thread
         with self._lock:
             self._carrier = dict(carrier)
+        # Also hand the context to the page: the frontend OTel SDK parents its
+        # user-action spans on it (and sends its own traceparent on fetches).
+        try:
+            self._driver.execute_script("window.__traceCarrier = arguments[0];", dict(carrier))
+        except Exception:
+            pass  # no page loaded yet; the document request itself is still injected
 
     def _handle_request(self, request):
         # Must always continue the request, or the browser hangs on this intercept.
         try:
             with self._lock:
                 carrier = dict(self._carrier)
-            drop = ("traceparent", "tracestate")
-            headers = [h for h in request.headers or []
-                       if h.get("name", "").lower() not in drop]
+            existing = {h.get("name", "").lower() for h in request.headers or []}
+            if "traceparent" in existing:
+                # The frontend SDK already set one (parented on our context):
+                # leave it, or we'd orphan the browser spans from the trace.
+                carrier = {}
+            headers = list(request.headers or [])
             for name, value in carrier.items():
                 headers.append({"name": name, "value": {"type": "string", "value": value}})
             with _SEND_LOCK:

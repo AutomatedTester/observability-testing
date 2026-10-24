@@ -7,6 +7,8 @@ A small demo showing two things together:
 2. A **Selenium** test suite that hooks into that observability by injecting a
    W3C `traceparent` into the browser's requests **via Selenium BiDi**, so a
    single user action is one end-to-end trace: **test → browser → backend**.
+   The browser itself is instrumented too (OTel web SDK), so frontend spans
+   sit in the middle of that trace.
 
 ```
 Selenium test (root span per action)
@@ -30,7 +32,11 @@ enough real user actions to observe.
 app/
   main.py            Flask routes (auto-instrumented) + manual spans/metrics/logs
   telemetry.py       OTel wiring: traces→Jaeger, metrics→console, logs→console
-  templates/index.html   UI with stable data-testid hooks; plain fetch() calls
+  templates/index.html   UI with stable data-testid hooks; fetch() calls wrapped in user-action spans
+  static/otel.js     BUILT browser OTel bundle (committed; do not edit, see frontend/)
+frontend/
+  otel.js            Browser OTel source: web SDK, fetch instrumentation, userAction()
+  package.json       `npm install && npm run build` -> app/static/otel.js
 tests/
   conftest.py        BiDi-enabled Chrome driver + test-side OTel ("selenium-tests")
   bidi_trace.py      TraceparentInjector: BiDi network intercept that injects traceparent
@@ -73,13 +79,33 @@ open the newest trace. You'll see one trace spanning both services:
 ```
 [selenium-tests] test: full task lifecycle
   [selenium-tests] add task
-    [todo-app] POST /api/tasks
-      [todo-app] create_task
-  [selenium-tests] complete task
-    [todo-app] POST /api/tasks/<int:task_id>/complete
-      [todo-app] complete_task
+    [todo-app-frontend] ui.add_task
+      [todo-app-frontend] HTTP POST
+        [todo-app] POST /api/tasks
+          [todo-app] create_task
   ...
 ```
+
+## Frontend telemetry
+
+`frontend/otel.js` sets up the OpenTelemetry web SDK (service
+`todo-app-frontend`) with fetch auto-instrumentation. Each click/submit runs in
+a `ui.*` span (`userAction()`), and fetches made inside it are its children; the
+browser sends its own `traceparent`, so the Flask spans nest under them.
+
+- **Export path:** the browser posts OTLP to same-origin `/otel/v1/traces`, which
+  Flask forwards to `OTEL_EXPORTER_OTLP_ENDPOINT`. No CORS config on Jaeger, and
+  the route is excluded from server tracing.
+- **Test linkage:** the server renders the current span as
+  `<meta name="traceparent">` for the initial load, and the BiDi injector sets
+  `window.__traceCarrier` before each test action. The injector leaves a
+  browser-set `traceparent` alone (it only fills in requests that lack one).
+- **Rebuilding:** after editing `frontend/otel.js`, run
+  `cd frontend && npm install && npm run build`.
+- **Why bundled, not a CDN:** CDN ESM builds load as dozens of modules (and
+  duplicate `@opentelemetry/api`). Each request passes through the serialized BiDi
+  intercept, which hung Selenium clicks. One same-origin file avoids that.
+- The exporter is forced onto XHR (explicit headers) rather than `sendBeacon`.
 
 Metrics (`tasks.created`, `http.server.duration`, …) and logs print to the
 app's console; each log line carries the active `trace_id`, so you can pivot

@@ -8,9 +8,12 @@ metrics and correlated logs.
 """
 
 import time
+import urllib.error
+import urllib.request
 from itertools import count
 
-from flask import Flask, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request
+from opentelemetry import propagate
 from opentelemetry.instrumentation.flask import FlaskInstrumentor
 from opentelemetry.trace import SpanKind
 
@@ -22,7 +25,8 @@ tracer = telemetry.tracer  # bound after setup_telemetry()
 
 app = Flask(__name__)
 # Auto-instrument Flask: server spans + W3C context extraction from headers.
-FlaskInstrumentor().instrument_app(app)
+# The browser's OTLP proxy is excluded so exporting spans doesn't create spans.
+FlaskInstrumentor().instrument_app(app, excluded_urls="otel/v1")
 
 # In-memory "database" (demo only).
 _ids = count(1)
@@ -37,7 +41,30 @@ def _record_duration(route: str, start: float) -> None:
 
 @app.route("/")
 def index():
-    return render_template("index.html")
+    # Hand the server span's context to the page so browser spans from the
+    # initial load join the same trace as the document request.
+    carrier = {}
+    propagate.inject(carrier)
+    return render_template("index.html", traceparent=carrier.get("traceparent", ""))
+
+
+@app.post("/otel/v1/traces")
+def proxy_browser_traces():
+    """Forward browser OTLP/HTTP trace exports to the collector (same-origin, no CORS)."""
+    upstream = urllib.request.Request(
+        f"{telemetry.OTLP_BASE}/v1/traces",
+        data=request.get_data(),
+        headers={"Content-Type": request.content_type or "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(upstream, timeout=5) as resp:
+            return Response(resp.read(), status=resp.status,
+                            content_type=resp.headers.get("Content-Type"))
+    except urllib.error.HTTPError as e:
+        return Response(e.read(), status=e.code, content_type=e.headers.get("Content-Type"))
+    except (urllib.error.URLError, TimeoutError):
+        return Response(status=502)
 
 
 @app.get("/api/tasks")

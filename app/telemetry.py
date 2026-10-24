@@ -34,6 +34,8 @@ SERVICE = "todo-app"
 # Base OTLP endpoint (no signal path); we append the signal-specific path below.
 _OTLP_BASE = os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4318").rstrip("/")
 
+OTLP_BASE = _OTLP_BASE
+
 _resource = Resource.create(
     {
         SERVICE_NAME: SERVICE,

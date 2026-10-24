@@ -4,6 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Observable To-Do</title>
+  <meta name="traceparent" content="{{ traceparent }}" />
   <style>
     :root { color-scheme: light dark; }
     body { font-family: system-ui, sans-serif; max-width: 40rem; margin: 3rem auto; padding: 0 1rem; }
@@ -31,11 +32,14 @@
 
   <ul id="task-list" data-testid="task-list"></ul>
 
-  <script>
-    async function api(method, url, body) {
+  <script type="module">
+    import { userAction, withContext } from "{{ url_for('static', filename='otel.js') }}";
+
+    // `ctx` is the active user-action span's context; fetch() is parented to it.
+    async function api(method, url, body, ctx) {
       const opts = { method, headers: { "Content-Type": "application/json" } };
       if (body !== undefined) opts.body = JSON.stringify(body);
-      const res = await fetch(url, opts);
+      const res = await withContext(ctx, () => fetch(url, opts));
       return res.ok ? res.json() : Promise.reject(new Error(res.status));
     }
 
@@ -57,33 +61,41 @@
         done.textContent = t.done ? "Done" : "Complete";
         done.disabled = t.done;
         done.dataset.testid = "complete-task";
-        done.onclick = async () => { await api("POST", `/api/tasks/${t.id}/complete`); await load(); };
+        done.onclick = () => userAction("ui.complete_task", { "task.id": t.id }, async (ctx) => {
+          await api("POST", `/api/tasks/${t.id}/complete`, undefined, ctx);
+          await load(ctx);
+        });
 
         const del = document.createElement("button");
         del.textContent = "Delete";
         del.dataset.testid = "delete-task";
-        del.onclick = async () => { await api("DELETE", `/api/tasks/${t.id}`); await load(); };
+        del.onclick = () => userAction("ui.delete_task", { "task.id": t.id }, async (ctx) => {
+          await api("DELETE", `/api/tasks/${t.id}`, undefined, ctx);
+          await load(ctx);
+        });
 
         li.append(title, done, del);
         list.append(li);
       }
     }
 
-    async function load() {
-      render(await api("GET", "/api/tasks"));
+    async function load(ctx) {
+      render(await api("GET", "/api/tasks", undefined, ctx));
     }
 
-    document.getElementById("new-task-form").addEventListener("submit", async (e) => {
+    document.getElementById("new-task-form").addEventListener("submit", (e) => {
       e.preventDefault();
       const input = document.getElementById("task-title");
       const title = input.value.trim();
       if (!title) return;
-      await api("POST", "/api/tasks", { title });
-      input.value = "";
-      await load();
+      return userAction("ui.add_task", {}, async (ctx) => {
+        await api("POST", "/api/tasks", { title }, ctx);
+        input.value = "";
+        await load(ctx);
+      });
     });
 
-    load();
+    userAction("ui.load_tasks", {}, (ctx) => load(ctx), { initial: true });
   </script>
 </body>
 </html>
