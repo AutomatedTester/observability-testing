@@ -7,6 +7,7 @@ so browser/test-initiated traces continue here), plus we add manual spans,
 metrics and correlated logs.
 """
 
+import os
 import time
 import urllib.error
 import urllib.request
@@ -15,7 +16,7 @@ from itertools import count
 from flask import Flask, Response, jsonify, render_template, request
 from opentelemetry import propagate
 from opentelemetry.instrumentation.flask import FlaskInstrumentor
-from opentelemetry.trace import SpanKind
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from app import telemetry
 from app.telemetry import log, setup_telemetry
@@ -27,6 +28,8 @@ app = Flask(__name__)
 # Auto-instrument Flask: server spans + W3C context extraction from headers.
 # The browser's OTLP proxy is excluded so exporting spans doesn't create spans.
 FlaskInstrumentor().instrument_app(app, excluded_urls="otel/v1")
+
+INVENTORY_URL = os.environ.get("INVENTORY_URL", "http://127.0.0.1:5001")
 
 # In-memory "database" (demo only).
 _ids = count(1)
@@ -65,6 +68,33 @@ def proxy_browser_traces():
         return Response(e.read(), status=e.code, content_type=e.headers.get("Content-Type"))
     except (urllib.error.URLError, TimeoutError):
         return Response(status=502)
+
+
+@app.get("/api/sync")
+def sync_inventory():
+    """Call the (always failing) inventory-service and pass its 500 through."""
+    start = time.time()
+    with tracer.start_as_current_span("sync_inventory", kind=SpanKind.CLIENT) as span:
+        headers = {}
+        propagate.inject(headers)  # carry this span's traceparent downstream
+        upstream = urllib.request.Request(f"{INVENTORY_URL}/api/stock", headers=headers)
+        try:
+            with urllib.request.urlopen(upstream, timeout=5) as resp:
+                span.set_attribute("http.status_code", resp.status)
+                _record_duration("sync_inventory", start)
+                return Response(resp.read(), status=resp.status, content_type="application/json")
+        except urllib.error.HTTPError as e:
+            span.set_attribute("http.status_code", e.code)
+            span.set_status(Status(StatusCode.ERROR, f"inventory-service returned {e.code}"))
+            log.error("inventory-service returned %d", e.code)
+            _record_duration("sync_inventory", start)
+            return Response(e.read(), status=e.code, content_type="application/json")
+        except (urllib.error.URLError, TimeoutError) as e:
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, "inventory-service unreachable"))
+            log.error("inventory-service unreachable: %s", e)
+            _record_duration("sync_inventory", start)
+            return jsonify({"error": "inventory-service unreachable"}), 502
 
 
 @app.get("/api/tasks")

@@ -31,6 +31,7 @@ enough real user actions to observe.
 ```
 app/
   main.py            Flask routes (auto-instrumented) + manual spans/metrics/logs
+  failing_service.py Second service (inventory-service, :5001) that always returns HTTP 500
   telemetry.py       OTel wiring: traces→Jaeger, metrics→console, logs→console
   templates/index.html   UI with stable data-testid hooks; fetch() calls wrapped in user-action spans
   static/otel.js     BUILT browser OTel bundle (committed; do not edit, see frontend/)
@@ -45,6 +46,7 @@ tests/
 scripts/
   run_jaeger.sh      Downloads + runs the Jaeger all-in-one native binary (no Docker)
   run_app.sh         Runs the Flask app
+  run_failing_service.sh  Runs the always-500 inventory-service on :5001
 ```
 
 ## Prerequisites
@@ -153,6 +155,17 @@ become children of the test's span — the whole interaction is one trace.
   Concurrent `continue_request()` calls interleave `ws.send()` frames and can
   drop the connection (*"Connection to remote host was lost"*), leaving requests
   hung. `bidi_trace.py` guards the call with a process-wide lock.
+
+## Seeing a 500 in Jaeger
+
+`inventory-service` (`scripts/run_failing_service.sh`, port 5001) always fails
+`GET /api/stock` with HTTP 500. The todo-app's `GET /api/sync` calls it with the
+`traceparent` forwarded, and `test_server_error_trace` drives that and asserts on
+the resulting trace. In Jaeger, open the `selenium-tests` trace: the failing spans
+(`GET /api/stock`, `load_stock`, `sync_inventory`, `GET /api/sync`) are flagged with
+the red error icon, `http.status_code=500`, and `load_stock` carries the recorded
+exception event. Run the service in a fourth terminal before the tests; the todo-app
+finds it via `INVENTORY_URL` (default `http://127.0.0.1:5001`).
 
 ## Configuration
 

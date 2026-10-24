@@ -149,3 +149,29 @@ def test_add_task_trace(driver, injector, tracer, app_url):
     assert all(s.status != "ERROR" for s in spans), [s for s in spans if s.status == "ERROR"]
     # Budget: the backend work stayed fast.
     assert spans.op("create_task").duration_ms < 50
+
+
+def test_server_error_trace(driver, injector, tracer, app_url):
+    """Failure path: a downstream 500 should be visible in the trace, not just the UI.
+
+    Needs inventory-service running (scripts/run_failing_service.sh). The
+    todo-app's /api/sync calls it, so the error spans cross two services.
+    """
+    with tracer.start_as_current_span("test: server error trace") as root:
+        trace_id = format(root.get_span_context().trace_id, "032x")
+
+        with traced_action(tracer, injector, "sync inventory"):
+            _navigate(driver, f"{app_url}/api/sync")
+
+    trace.get_tracer_provider().force_flush()
+    spans = jaeger.get_trace(trace_id, expect=["sync inventory", "load_stock"])
+
+    sync = spans.child_of("sync inventory")
+    # The failure originated in the inventory service...
+    stock = sync.op("load_stock")
+    assert stock.service == "inventory-service"
+    assert stock.status == "ERROR"
+    assert sync.has("GET /api/stock", attrs={"http.status_code": 500})
+    # ...and the todo-app span that called it is marked failed too.
+    assert sync.op("sync_inventory").status == "ERROR"
+    assert sync.has("GET /api/sync", attrs={"http.status_code": 500})
