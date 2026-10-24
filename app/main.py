@@ -70,9 +70,12 @@ def proxy_browser_traces():
         return Response(status=502)
 
 
-@app.get("/api/sync")
-def sync_inventory():
-    """Call the (always failing) inventory-service and pass its 500 through."""
+def _sync_inventory() -> None:
+    """Best-effort stock refresh after a task is created.
+
+    inventory-service always fails, but the user never needs to know: errors are
+    recorded on the span and in the logs, then swallowed so the UI still works.
+    """
     start = time.time()
     with tracer.start_as_current_span("sync_inventory", kind=SpanKind.CLIENT) as span:
         headers = {}
@@ -81,20 +84,16 @@ def sync_inventory():
         try:
             with urllib.request.urlopen(upstream, timeout=5) as resp:
                 span.set_attribute("http.status_code", resp.status)
-                _record_duration("sync_inventory", start)
-                return Response(resp.read(), status=resp.status, content_type="application/json")
         except urllib.error.HTTPError as e:
             span.set_attribute("http.status_code", e.code)
             span.set_status(Status(StatusCode.ERROR, f"inventory-service returned {e.code}"))
             log.error("inventory-service returned %d", e.code)
-            _record_duration("sync_inventory", start)
-            return Response(e.read(), status=e.code, content_type="application/json")
         except (urllib.error.URLError, TimeoutError) as e:
             span.record_exception(e)
             span.set_status(Status(StatusCode.ERROR, "inventory-service unreachable"))
             log.error("inventory-service unreachable: %s", e)
+        finally:
             _record_duration("sync_inventory", start)
-            return jsonify({"error": "inventory-service unreachable"}), 502
 
 
 @app.get("/api/tasks")
@@ -125,7 +124,9 @@ def create_task():
         telemetry.tasks_created_counter.add(1)
         log.info("Created task %d: %s", task["id"], title)
         _record_duration("create_task", start)
-        return jsonify(task), 201
+
+    _sync_inventory()  # failure is swallowed; the user still gets their task
+    return jsonify(task), 201
 
 
 @app.post("/api/tasks/<int:task_id>/complete")

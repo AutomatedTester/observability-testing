@@ -159,12 +159,14 @@ become children of the test's span — the whole interaction is one trace.
 ## Seeing a 500 in Jaeger
 
 `inventory-service` (`scripts/run_failing_service.sh`, port 5001) always fails
-`GET /api/stock` with HTTP 500. The todo-app's `GET /api/sync` calls it with the
-`traceparent` forwarded, and `test_server_error_trace` drives that and asserts on
-the resulting trace. In Jaeger, open the `selenium-tests` trace: the failing spans
-(`GET /api/stock`, `load_stock`, `sync_inventory`, `GET /api/sync`) are flagged with
-the red error icon, `http.status_code=500`, and `load_stock` carries the recorded
-exception event. Run the service in a fourth terminal before the tests; the todo-app
+`GET /api/stock` with HTTP 500. Creating a task makes the todo-app call it (as the
+`sync_inventory` span, `traceparent` forwarded) and swallow the error, so the UI
+works and `test_full_task_lifecycle` passes. `test_server_error_trace` asserts the
+UI succeeded *and* that the trace contains the failure (`GET /api/stock`,
+`load_stock`, `sync_inventory` flagged with the red error icon, `http.status_code=500`,
+and `load_stock` carrying the recorded exception event). `test_add_task_trace`'s
+"no error spans" check now fails for the same reason: only the trace reveals the
+hidden error. Run the service in a fourth terminal before the tests; the todo-app
 finds it via `INVENTORY_URL` (default `http://127.0.0.1:5001`).
 
 ## Configuration

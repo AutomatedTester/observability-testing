@@ -152,26 +152,39 @@ def test_add_task_trace(driver, injector, tracer, app_url):
 
 
 def test_server_error_trace(driver, injector, tracer, app_url):
-    """Failure path: a downstream 500 should be visible in the trace, not just the UI.
+    """Hidden failure: the UI works, but the trace shows inventory-service's 500.
 
-    Needs inventory-service running (scripts/run_failing_service.sh). The
-    todo-app's /api/sync calls it, so the error spans cross two services.
+    Needs inventory-service running (scripts/run_failing_service.sh). Adding a
+    task makes the todo-app call it in the background and swallow the error, so
+    the UI assertions pass while the spans record the failure across two services.
     """
+    wait = WebDriverWait(driver, 10, ignored_exceptions=STALE)
+    title = f"Hidden 500 {uuid.uuid4().hex[:8]}"
+
     with tracer.start_as_current_span("test: server error trace") as root:
         trace_id = format(root.get_span_context().trace_id, "032x")
 
-        with traced_action(tracer, injector, "sync inventory"):
-            _navigate(driver, f"{app_url}/api/sync")
+        with traced_action(tracer, injector, "open app"):
+            _navigate(driver, app_url)
+            wait.until(EC.presence_of_element_located(_css("task-title")))
+
+        with traced_action(tracer, injector, "add task"):
+            driver.find_element(*_css("task-title")).send_keys(title)
+            driver.find_element(*_css("add-task")).click()
+            wait.until(lambda d: title in _task_titles(d))
+
+        # The UI sees nothing wrong.
+        assert title in _task_titles(driver)
 
     trace.get_tracer_provider().force_flush()
-    spans = jaeger.get_trace(trace_id, expect=["sync inventory", "load_stock"])
+    spans = jaeger.get_trace(trace_id, expect=["add task", "create_task", "load_stock"])
 
-    sync = spans.child_of("sync inventory")
-    # The failure originated in the inventory service...
-    stock = sync.op("load_stock")
+    add = spans.child_of("add task")
+    # The task was created fine...
+    assert add.has("POST /api/tasks", attrs={"http.status_code": 201})
+    # ...but the background call to inventory-service failed.
+    stock = add.op("load_stock")
     assert stock.service == "inventory-service"
     assert stock.status == "ERROR"
-    assert sync.has("GET /api/stock", attrs={"http.status_code": 500})
-    # ...and the todo-app span that called it is marked failed too.
-    assert sync.op("sync_inventory").status == "ERROR"
-    assert sync.has("GET /api/sync", attrs={"http.status_code": 500})
+    assert add.has("GET /api/stock", attrs={"http.status_code": 500})
+    assert add.op("sync_inventory").status == "ERROR"

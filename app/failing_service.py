@@ -1,7 +1,7 @@
 """A second service that always fails, to see how errors look in Jaeger.
 
 Runs as its own OTel service ("inventory-service") on port 5001. The todo-app
-calls it from `/api/sync`, forwarding the W3C `traceparent`, so the failure
+calls it after every task is created, forwarding the W3C `traceparent`, so the failure
 appears as a child of the todo-app span in the same trace.
 
 Endpoints:
